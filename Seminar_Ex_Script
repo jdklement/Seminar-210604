@@ -8,12 +8,19 @@ if (!requireNamespace("BiocManager", quietly = TRUE))
 BiocManager::install(version='devel')
 BiocManager::install("CelliD")
 
+#install EnhancedVolcano from bioconductor
+if (!requireNamespace('BiocManager', quietly = TRUE))
+  install.packages('BiocManager')
+
+BiocManager::install('EnhancedVolcano')
+
 #load packages in workspace
 library(Seurat)
 library(tidyverse)
 library(CelliD)
 library(ggpubr)
 library(msigdbr)
+library(EnhancedVolcano)
 
 #set working drive to where data files are located
 setwd("~/Documents/Lab/Fun/210604 Seminar/Data")
@@ -62,7 +69,7 @@ panglao <- read_tsv("https://panglaodb.se/markers/PanglaoDB_markers_27_Mar_2020.
 panglao_colon <- panglao %>% filter(organ == "GI tract")
 ##restricting to mouse specific genes
 panglao_colon <- panglao_colon %>%  filter(str_detect(species,"Mm"))
-##ensuring signatures are capitalized same way as our genes
+##ensuring signatures are calcualted same way as our enes
 panglao_colon$`official gene symbol` <- str_to_title(panglao_colon$`official gene symbol`)
 ##converts dataframe to list
 panglao_colon <- panglao_colon %>%  
@@ -90,21 +97,55 @@ colon@assays[["Hallmark"]] <- CreateAssayObject(HGT_Hallmark)
 DefaultAssay(colon) <- "Hallmark"
 
 #Visualize scores in heatmap format
-Idents(colon) <- "free_annotation"
+Idents(colon) <- "colon_gs_prediction"
 colon <- ScaleData(colon)
-DoHeatmap(colon, features = colon@assays[["Hallmark"]]@counts@Dimnames[[1]],
-          slot = "scale.data", label = F) + viridis::scale_fill_viridis()
+FeaturePlot(colon, features = c("HALLMARK-INTERFERON-ALPHA-RESPONSE",
+                              "HALLMARK-FATTY-ACID-METABOLISM",
+                              "HALLMARK-G2M-CHECKPOINT",
+                              "HALLMARK-WNT-BETA-CATENIN-SIGNALING"),
+          slot = "scale.data")
 
 
-#Vln Plot differences
+#Generate Figures
 Idents(colon) <- "colon_gs_prediction"
 DefaultAssay(colon) <- "RNA"
+##Generate Feature Plot of IRF8 on UMAP
 FeaturePlot(colon, "Irf8")
+##Generate Violin plot of IRF8
+VlnPlot(colon, "Irf8")
+##Generate Ridge plot of IRF8
+RidgePlot(colon, "Irf8")
+##Generate Dot Plot of IRF8 and CD44
+DotPlot(colon, features = c("Irf8", "Cd44"))
+##Generate Feature Plot of Signatures
+DefaultAssay(colon) <- "Hallmark"
+FeaturePlot(colon, features = c("HALLMARK-INTERFERON-ALPHA-RESPONSE", 
+                                "HALLMARK-FATTY-ACID-METABOLISM", 
+                                "HALLMARK-G2M-CHECKPOINT", 
+                                "HALLMARK-WNT-BETA-CATENIN-SIGNALING"), 
+            slot = "scale.data")
+
+##Sub-analyze crypt cell populations
 entero <- subset(colon, idents = "Crypt Cells")
+##determine mean of IRF8 expression in crypt cells
 irf8.mean <- mean(entero[["RNA"]]@data["Irf8",])
+##label cells as having greater or lesser expression of IRF
 entero$irf8 <- entero[["RNA"]]@data["Irf8",] > irf8.mean
 DefaultAssay(entero) <- "Hallmark"
 Idents(entero) <- "irf8"
+##Plot Heatmap of IRF8 high and low signatures
+DoHeatmap(entero, features = entero@assays[["Hallmark"]]@data@Dimnames[[1]],
+          slot= "scale.data", assay= "Hallmark", label = F) +
+  viridis::scale_fill_viridis()
+#Isolate markers for IRF8 high and low populations
 irf8.markers <- Seurat::FindMarkers(entero, ident.1 = T, ident.2 = F)
-DoHeatmap(entero, features = entero@assays[["Hallmark"]]@counts@Dimnames[[1]], slot = "scale.data", label = F) + viridis::scale_fill_viridis()
-
+entero <- ScaleData(entero)
+ros <- unlist(HallmarkDF["HALLMARK_FATTY_ACID_METABOLISM"])
+DefaultAssay(entero) <- "RNA"
+email <- FindMarkers(entero, ident.1 = T, ident.2 = F, logfc.threshold = 0)
+email <- email[rownames(email) %in% ros,]
+#Plot FA metabolism genes differentially expressed
+EnhancedVolcano(email, lab = rownames(email),
+                x = 'avg_log2FC',
+                y = 'p_val_adj',
+                FCcutoff = 1)
