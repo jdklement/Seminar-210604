@@ -1,0 +1,110 @@
+#install packages available from CRAN
+install.packages('Seurat', 'tidyverse', 'msigdbr', 'ggpubr')
+
+#install CelliD from bioconductor
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+##The following initializes usage of Bioc devel
+BiocManager::install(version='devel')
+BiocManager::install("CelliD")
+
+#load packages in workspace
+library(Seurat)
+library(tidyverse)
+library(CelliD)
+library(ggpubr)
+library(msigdbr)
+
+#set working drive to where data files are located
+setwd("~/Documents/Lab/Fun/210604 Seminar/Data")
+
+#load vector of genes that encode for proteins in mice
+data("MgProteinCodingGenes")
+
+#Create Seurat object
+##read in Colon expression dataset; note read_csv used as file csv
+colon <- read_csv("FACS/Large_Intestine-counts.csv")
+##set cell to rowname
+colon <- tibble::column_to_rownames(colon, var = "X1")
+##filter out rownames that do not encode for protein in mice
+colon <- colon[rownames(colon) %in% MgProteinCodingGenes,]
+##read in metadata
+colon.anno <- read_csv("annotations_facs.csv")
+##set cell to rowname
+colon.anno <- tibble::column_to_rownames(colon.anno, var = "cell")
+##Create seurat object, filtering out genes that are not expressed in >=5 cells,
+##or cells that do not express at least 200 genes
+colon <- CreateSeuratObject(counts = colon, meta.data = colon.anno,
+                            min.cells = 5, min.features = 200)
+##annotate cells with percent of mitochondrial reads
+colon[["percent.mt"]] <- Seurat::PercentageFeatureSet(colon, pattern = "^Mt")
+
+
+#Process files according to standard Seurat pipeline, scaling out mitochondrial reads
+#so as not to be used in defining variable features for downstream analysis
+colon <- colon %>%
+  Seurat::NormalizeData() %>%
+  Seurat::FindVariableFeatures() %>%
+  Seurat::ScaleData(vars.to.regress = c("percent.mt"))
+colon <- Seurat::RunPCA(colon, npcs = 100, features = VariableFeatures(colon))
+##Use Elbowplot to find 'inflection' point in PCs to use as cutoff
+ElbowPlot(colon, ndims = 100)
+##Number of dims = number of PCs used; if you wanted to use first 50 PCs, would imput 1:50 instead of 1:30
+colon <- FindNeighbors(colon, dims = 1:30)
+##Increasing resolution will increase the number of clusters identified by Seurat
+colon <- FindClusters(colon, resolution = 0.5)
+colon <- RunUMAP(colon, dims = 1:30)
+
+#label cells with CellID
+##reads in Panglao dataset containing cell specific signatures
+panglao <- read_tsv("https://panglaodb.se/markers/PanglaoDB_markers_27_Mar_2020.tsv.gz")
+##filtering dataset for signatuers associated for GI tract
+panglao_colon <- panglao %>% filter(organ == "GI tract")
+##restricting to mouse specific genes
+panglao_colon <- panglao_colon %>%  filter(str_detect(species,"Mm"))
+##ensuring signatures are capitalized same way as our genes
+panglao_colon$`official gene symbol` <- str_to_title(panglao_colon$`official gene symbol`)
+##converts dataframe to list
+panglao_colon <- panglao_colon %>%  
+  group_by(`cell type`) %>%  
+  summarise(geneset = list(`official gene symbol`))
+colon_gs <- setNames(panglao_colon$geneset, panglao_colon$`cell type`)
+##creates MCA (multiple correspondence analysis dimensionality reduction)
+colon <- RunMCA(colon)
+##Runs prediction algorithm
+HGT_colon_gs <- RunCellHGT(colon, pathways = colon_gs, dims = 1:50, n.features = 200)
+colon_gs_prediction <- rownames(HGT_colon_gs)[apply(HGT_colon_gs, 2, which.max)]
+##adds annotations to Seurat object
+colon$colon_gs_prediction <- colon_gs_prediction
+
+#Score cells for HALLMARK signatures
+##downloads hallmark signatures for mice
+msigdf <- msigdbr::msigdbr(species = "Mus musculus", category = "H")
+##creates hallmark signatures into list format
+HallmarkDF <- split(x = msigdf$gene_symbol, f = msigdf$gs_name)
+HallmarkDF <- as.list(HallmarkDF)
+##scores cells against hallmark signatures
+HGT_Hallmark <- RunCellHGT(colon, pathways = HallmarkDF, dims = 1:50)
+##loads scores back into Seurat Object
+colon@assays[["Hallmark"]] <- CreateAssayObject(HGT_Hallmark)
+DefaultAssay(colon) <- "Hallmark"
+
+#Visualize scores in heatmap format
+Idents(colon) <- "free_annotation"
+colon <- ScaleData(colon)
+DoHeatmap(colon, features = colon@assays[["Hallmark"]]@counts@Dimnames[[1]],
+          slot = "scale.data", label = F) + viridis::scale_fill_viridis()
+
+
+#Vln Plot differences
+Idents(colon) <- "colon_gs_prediction"
+DefaultAssay(colon) <- "RNA"
+FeaturePlot(colon, "Irf8")
+entero <- subset(colon, idents = "Crypt Cells")
+irf8.mean <- mean(entero[["RNA"]]@data["Irf8",])
+entero$irf8 <- entero[["RNA"]]@data["Irf8",] > irf8.mean
+DefaultAssay(entero) <- "Hallmark"
+Idents(entero) <- "irf8"
+irf8.markers <- Seurat::FindMarkers(entero, ident.1 = T, ident.2 = F)
+DoHeatmap(entero, features = entero@assays[["Hallmark"]]@counts@Dimnames[[1]], slot = "scale.data", label = F) + viridis::scale_fill_viridis()
+
